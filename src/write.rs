@@ -2,7 +2,6 @@ use crate::read::ReadHandle;
 use crate::Absorb;
 
 use crate::sync::{fence, Arc, AtomicUsize, MutexGuard, Ordering};
-use std::collections::VecDeque;
 use std::marker::PhantomData;
 use std::ops::DerefMut;
 use std::ptr::NonNull;
@@ -28,8 +27,8 @@ where
 {
     epochs: crate::Epochs,
     w_handle: NonNull<T>,
-    partial_log: Vec<O>,
-    pending_log: Vec<O>,
+    partial_log: T::OpLog,
+    pending_log: T::OpLog,
     r_handle: ReadHandle<T>,
     last_epochs: Vec<usize>,
     #[cfg(test)]
@@ -156,15 +155,15 @@ where
 
         // first, ensure both copies are up to date
         // (otherwise safely dropping the possibly duplicated w_handle data is a pain)
-        if self.first || !self.partial_log.is_empty() || !self.pending_log.is_empty() {
+        if self.first || !T::log_empty(&self.partial_log) || !T::log_empty(&self.pending_log) {
             self.publish();
             // first publish moved pending into partial, publish again if not empty.
-            if !self.partial_log.is_empty() {
+            if !T::log_empty(&self.partial_log) {
                 self.publish();
             }
         }
         // All ops are absorbed by both copies
-        assert!(self.partial_log.is_empty() && self.pending_log.is_empty());
+        assert!(T::log_empty(&self.partial_log) && T::log_empty(&self.pending_log));
 
         // next, grab the read handle and set it to NULL
         let r_handle = self.r_handle.inner.swap(ptr::null_mut(), Ordering::Release);
@@ -219,8 +218,8 @@ where
             epochs,
             // safety: Box<T> is not null and covariant.
             w_handle: unsafe { NonNull::new_unchecked(Box::into_raw(Box::new(w_handle))) },
-            partial_log: Vec::new(),
-            pending_log: Vec::new(),
+            partial_log: T::OpLog::default(),
+            pending_log: T::OpLog::default(),
             r_handle,
             last_epochs: Vec::new(),
             #[cfg(test)]
@@ -338,15 +337,14 @@ where
             // we can drain out the operations that only the w_handle copy needs
             //
             // NOTE: the if above is because drain(0..0) would remove 0
-            for op in self.partial_log.drain(..) {
-                T::absorb_second(w_handle, op, r_handle);
+            T::absorb_second(w_handle, &mut self.partial_log, r_handle);
+            if !T::LOG_REUSE {
+                self.partial_log = T::OpLog::default();
             }
 
             // we cannot give owned operations to absorb_first
             // since they'll also be needed by the r_handle copy
-            for op in self.pending_log.iter_mut() {
-                T::absorb_first(w_handle, op, r_handle);
-            }
+            T::absorb_first(w_handle, &mut self.pending_log, r_handle);
 
             std::mem::swap(&mut self.partial_log, &mut self.pending_log);
             // the w_handle copy is about to become the r_handle, and can ignore the oplog
@@ -402,7 +400,7 @@ where
     /// Returns true if there are operations in the operational log that have not yet been exposed
     /// to readers.
     pub fn has_pending_operations(&self) -> bool {
-        !self.pending_log.is_empty()
+        !T::log_empty(&self.pending_log)
     }
 
     /// Append the given operation to the operational log.
@@ -472,11 +470,11 @@ where
             let r_handle = self.enter().expect("map has not yet been destroyed");
             // Because we are operating directly on the map, and nothing is aliased, we do want
             // to perform drops, so we invoke absorb_second.
-            for op in ops {
-                Absorb::absorb_second(w_inner, op, &*r_handle);
-            }
+            let mut log = T::OpLog::default();
+            T::log_ops(&mut log, ops);
+            Absorb::absorb_second(w_inner, &mut log, &*r_handle);
         } else {
-            self.pending_log.extend(ops);
+            T::log_ops(&mut self.pending_log, ops);
         }
     }
 }
@@ -488,6 +486,9 @@ where
 ///
 /// struct Data;
 /// impl left_right::Absorb<()> for Data {
+///     type OpLog = ();
+///     fn log_empty(_: &()) -> bool { true }
+///     fn log_ops<I: IntoIterator<Item = ()>>(_: &mut (), _: I) {}
 ///     fn absorb_first(&mut self, _: &mut (), _: &Self) {}
 ///     fn sync_with(&mut self, _: &Self) {}
 /// }
@@ -508,6 +509,9 @@ where
 ///
 /// struct Data(Rc<()>);
 /// impl left_right::Absorb<()> for Data {
+///     type OpLog = ();
+///     fn log_empty(_: &()) -> bool { true }
+///     fn log_ops<I: IntoIterator<Item = ()>>(_: &mut (), _: I) {}
 ///     fn absorb_first(&mut self, _: &mut (), _: &Self) {}
 /// }
 ///
@@ -526,7 +530,10 @@ where
 ///
 /// struct Data;
 /// impl left_right::Absorb<Rc<()>> for Data {
-///     fn absorb_first(&mut self, _: &mut Rc<()>, _: &Self) {}
+///     type OpLog = ();
+///     fn log_empty(_: &()) -> bool { true }
+///     fn log_ops<I: IntoIterator<Item = Rc<()>>>(_: &mut (), _: I) {}
+///     fn absorb_first(&mut self, _: &mut (), _: &Self) {}
 /// }
 ///
 /// fn is_send<T: Send>() {
@@ -544,6 +551,9 @@ where
 ///
 /// struct Data(Cell<()>);
 /// impl left_right::Absorb<()> for Data {
+///     type OpLog = ();
+///     fn log_empty(_: &()) -> bool { true }
+///     fn log_ops<I: IntoIterator<Item = ()>>(_: &mut (), _: I) {}
 ///     fn absorb_first(&mut self, _: &mut (), _: &Self) {}
 /// }
 ///

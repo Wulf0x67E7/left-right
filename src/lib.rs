@@ -68,18 +68,37 @@
 //!
 //! // First, define an operational log type.
 //! // For most real-world use-cases, this will be an `enum`, but we'll keep it simple:
+//! #[derive(Debug)]
 //! struct CounterAddOp(i32);
 //!
 //! // Then, implement the unsafe `Absorb` trait for your data structure type,
 //! // and provide the oplog type as the generic argument.
 //! // You can read this as "`i32` can absorb changes of type `CounterAddOp`".
 //! impl Absorb<CounterAddOp> for i32 {
+//!     // See the documentation of `Absorb::OpLog`.
+//!     type OpLog = Vec<CounterAddOp>;
+//!
+//!     // See the documentation of `Absorb::LOG_REUSE`.
+//!     const LOG_REUSE: bool = true;
+//!
+//!     // See the documentation of `Absorb::log_empty`.
+//!     fn log_empty(log: &Vec<CounterAddOp>) -> bool {
+//!         log.is_empty()
+//!     }
+//!
+//!     // See the documentation of `Absorb::log_ops`.
+//!     fn log_ops<I: IntoIterator<Item = CounterAddOp>>(pending_log: &mut Vec<CounterAddOp>, ops: I) {
+//!         pending_log.extend(ops);
+//!     }
+//!
 //!     // See the documentation of `Absorb::absorb_first`.
 //!     //
 //!     // Essentially, this is where you define what applying
 //!     // the oplog type to the datastructure does.
-//!     fn absorb_first(&mut self, operation: &mut CounterAddOp, _: &Self) {
-//!         *self += operation.0;
+//!     fn absorb_first(&mut self, pending_log: &mut Vec<CounterAddOp>, _: &Self) {
+//!         for op in pending_log {
+//!             *self += op.0;
+//!         }
 //!     }
 //!
 //!     // See the documentation of `Absorb::absorb_second`.
@@ -87,8 +106,10 @@
 //!     // This may or may not be the same as `absorb_first`,
 //!     // depending on whether or not you de-duplicate values
 //!     // across the two copies of your data structure.
-//!     fn absorb_second(&mut self, operation: CounterAddOp, _: &Self) {
-//!         *self += operation.0;
+//!     fn absorb_second(&mut self, partial_log: &mut Vec<CounterAddOp>, _: &Self) {
+//!         for op in partial_log.drain(..) {
+//!             *self += op.0;
+//!         }
 //!     }
 //!
 //!     // See the documentation of `Absorb::drop_first`.
@@ -196,7 +217,7 @@ pub mod aliasing;
 /// structure is logged as an operation of type `O` in an _operational log_ (oplog), and is applied
 /// once to each copy of the data.
 ///
-/// Implementations should ensure that the absorbption of each `O` is deterministic. That is, if
+/// Implementations should ensure that the absorption of each `O` is deterministic. That is, if
 /// two instances of the implementing type are initially equal, and then absorb the same `O`,
 /// they should remain equal afterwards. If this is not the case, the two copies will drift apart
 /// over time, and hold different values.
@@ -213,12 +234,17 @@ pub mod aliasing;
 /// values rather than drop them so that they are not dropped twice when the second copy is
 /// dropped.
 pub trait Absorb<O> {
+    type OpLog: Default + std::fmt::Debug;
+    const LOG_REUSE: bool = false;
+    fn log_empty(log: &Self::OpLog) -> bool;
+    fn log_ops<I: IntoIterator<Item = O>>(pending_log: &mut Self::OpLog, ops: I);
+
     /// Apply `O` to the first of the two copies.
     ///
     /// `other` is a reference to the other copy of the data, which has seen all operations up
     /// until the previous call to [`WriteHandle::publish`]. That is, `other` is one "publish
     /// cycle" behind.
-    fn absorb_first(&mut self, operation: &mut O, other: &Self);
+    fn absorb_first(&mut self, pending_log: &mut Self::OpLog, other: &Self);
 
     /// Apply `O` to the second of the two copies.
     ///
@@ -233,8 +259,8 @@ pub trait Absorb<O> {
     /// `RandomState` of a `HashMap` which can change iteration order.
     ///
     /// Defaults to calling `absorb_first`.
-    fn absorb_second(&mut self, mut operation: O, other: &Self) {
-        Self::absorb_first(self, &mut operation, other)
+    fn absorb_second(&mut self, partial_log: &mut Self::OpLog, other: &Self) {
+        Self::absorb_first(self, partial_log, other);
     }
 
     /// Drop the first of the two copies.
