@@ -28,8 +28,8 @@ where
 {
     epochs: crate::Epochs,
     w_handle: NonNull<T>,
-    oplog: VecDeque<O>,
-    swap_index: usize,
+    partial_log: Vec<O>,
+    pending_log: Vec<O>,
     r_handle: ReadHandle<T>,
     last_epochs: Vec<usize>,
     #[cfg(test)]
@@ -65,8 +65,8 @@ where
         f.debug_struct("WriteHandle")
             .field("epochs", &self.epochs)
             .field("w_handle", &self.w_handle)
-            .field("oplog", &self.oplog)
-            .field("swap_index", &self.swap_index)
+            .field("partial_log", &self.partial_log)
+            .field("pending_log", &self.pending_log)
             .field("r_handle", &self.r_handle)
             .field("first", &self.first)
             .field("second", &self.second)
@@ -156,13 +156,15 @@ where
 
         // first, ensure both copies are up to date
         // (otherwise safely dropping the possibly duplicated w_handle data is a pain)
-        if self.first || !self.oplog.is_empty() {
+        if self.first || !self.partial_log.is_empty() || !self.pending_log.is_empty() {
             self.publish();
+            // first publish moved pending into partial, publish again if not empty.
+            if !self.partial_log.is_empty() {
+                self.publish();
+            }
         }
-        if !self.oplog.is_empty() {
-            self.publish();
-        }
-        assert!(self.oplog.is_empty());
+        // All ops are absorbed by both copies
+        assert!(self.partial_log.is_empty() && self.pending_log.is_empty());
 
         // next, grab the read handle and set it to NULL
         let r_handle = self.r_handle.inner.swap(ptr::null_mut(), Ordering::Release);
@@ -217,8 +219,8 @@ where
             epochs,
             // safety: Box<T> is not null and covariant.
             w_handle: unsafe { NonNull::new_unchecked(Box::into_raw(Box::new(w_handle))) },
-            oplog: VecDeque::new(),
-            swap_index: 0,
+            partial_log: Vec::new(),
+            pending_log: Vec::new(),
             r_handle,
             last_epochs: Vec::new(),
             #[cfg(test)]
@@ -333,23 +335,23 @@ where
 
             // the w_handle copy has not seen any of the writes in the oplog
             // the r_handle copy has not seen any of the writes following swap_index
-            if self.swap_index != 0 {
-                // we can drain out the operations that only the w_handle copy needs
-                //
-                // NOTE: the if above is because drain(0..0) would remove 0
-                for op in self.oplog.drain(0..self.swap_index) {
-                    T::absorb_second(w_handle, op, r_handle);
-                }
+            // we can drain out the operations that only the w_handle copy needs
+            //
+            // NOTE: the if above is because drain(0..0) would remove 0
+            for op in self.partial_log.drain(..) {
+                T::absorb_second(w_handle, op, r_handle);
             }
+
             // we cannot give owned operations to absorb_first
             // since they'll also be needed by the r_handle copy
-            for op in self.oplog.iter_mut() {
+            for op in self.pending_log.iter_mut() {
                 T::absorb_first(w_handle, op, r_handle);
             }
-            // the w_handle copy is about to become the r_handle, and can ignore the oplog
-            self.swap_index = self.oplog.len();
 
-        // w_handle (the old r_handle) is now fully up to date!
+            std::mem::swap(&mut self.partial_log, &mut self.pending_log);
+            // the w_handle copy is about to become the r_handle, and can ignore the oplog
+
+            // w_handle (the old r_handle) is now fully up to date!
         } else {
             self.first = false
         }
@@ -400,9 +402,7 @@ where
     /// Returns true if there are operations in the operational log that have not yet been exposed
     /// to readers.
     pub fn has_pending_operations(&self) -> bool {
-        // NOTE: we don't use self.oplog.is_empty() here because it's not really that important if
-        // there are operations that have not yet been applied to the _write_ handle.
-        self.swap_index < self.oplog.len()
+        !self.pending_log.is_empty()
     }
 
     /// Append the given operation to the operational log.
@@ -476,7 +476,7 @@ where
                 Absorb::absorb_second(w_inner, op, &*r_handle);
             }
         } else {
-            self.oplog.extend(ops);
+            self.pending_log.extend(ops);
         }
     }
 }
@@ -568,13 +568,15 @@ mod tests {
         let (mut w, _r) = crate::new::<i32, _>();
         assert_eq!(w.first, true);
         w.append(CounterAddOp(1));
-        assert_eq!(w.oplog.len(), 0);
+        assert_eq!(w.partial_log.len(), 0);
+        assert_eq!(w.pending_log.len(), 0);
         assert_eq!(w.first, true);
         w.publish();
         assert_eq!(w.first, false);
         w.append(CounterAddOp(2));
         w.append(CounterAddOp(3));
-        assert_eq!(w.oplog.len(), 2);
+        assert_eq!(w.partial_log.len(), 0);
+        assert_eq!(w.pending_log.len(), 2);
     }
 
     #[test]
@@ -681,7 +683,8 @@ mod tests {
         // pin the epoch
         let _count = r.enter();
         // refresh would hang here
-        assert_eq!(w.oplog.iter().skip(w.swap_index).count(), 0);
+        assert_eq!(w.partial_log.len(), 0);
+        assert_eq!(w.pending_log.len(), 0);
         assert!(!w.has_pending_operations());
     }
 
