@@ -225,26 +225,31 @@ pub trait Absorb<Ops: Default> {
     /// If after [`Absorb::absorb_second`] calling this on `partial_ops` returns `true` it will be reused as `pending_ops` instead of `Ops::default()`.
     fn is_empty(ops: &Ops) -> bool;
 
-    /// Apply `O` to the first of the two copies.
+    /// Apply `Ops` to the first of the two copies.
     ///
     /// `other` is a reference to the other copy of the data, which has seen all operations up
     /// until the previous call to [`WriteHandle::publish`]. That is, `other` is one "publish
     /// cycle" behind.
+    ///
+    /// Afterwards, `pending_ops` becomes `partial_ops`.
     fn absorb_first(&mut self, pending_ops: &mut Ops, other: &Self);
 
-    /// Apply `O` to the second of the two copies.
+    /// Apply `Ops` to the second of the two copies.
     ///
     /// `other` is a reference to the other copy of the data, which has seen all operations up to
-    /// the call to [`WriteHandle::publish`] that initially exposed this `O`. That is, `other` is
+    /// the call to [`WriteHandle::publish`] that initially exposed this `Ops`. That is, `other` is
     /// one "publish cycle" ahead.
     ///
     /// Note that this method should modify the underlying data in _exactly_ the same way as
-    /// `O` modified `other`, otherwise the two copies will drift apart. Be particularly mindful of
+    /// `Ops` modified `other`, otherwise the two copies will drift apart. Be particularly mindful of
     /// non-deterministic implementations of traits that are often assumed to be deterministic
     /// (like `Eq` and `Hash`), and of "hidden states" that subtly affect results like the
     /// `RandomState` of a `HashMap` which can change iteration order.
     ///
     /// Defaults to calling `absorb_first`.
+    ///
+    /// Afterwards, `partial_ops` gets reused as the next `pending_ops` if calling [`Absorb::is_empty`] on it returns `true`,
+    /// or else dropped in favor of `Ops::Default`.
     fn absorb_second(&mut self, partial_ops: &mut Ops, other: &Self) {
         Self::absorb_first(self, partial_ops, other);
     }

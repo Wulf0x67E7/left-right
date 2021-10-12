@@ -143,12 +143,11 @@ impl<T: Absorb<Ops>, Ops: Default> WriteHandle<T, Ops> {
 
         // first, ensure both copies are up to date
         // (otherwise safely dropping the possibly duplicated w_handle data is a pain)
-        if !T::is_empty(&self.partial_ops) || !T::is_empty(&self.pending_ops) {
+        if !T::is_empty(&self.pending_ops) {
             self.publish();
-            // first publish moved pending into partial, publish again if not empty.
-            if !T::is_empty(&self.partial_ops) {
-                self.publish();
-            }
+            self.publish();
+        } else if !T::is_empty(&self.partial_ops) {
+            self.publish();
         }
         // All ops are absorbed by both copies
         assert!(T::is_empty(&self.partial_ops) && T::is_empty(&self.pending_ops));
@@ -321,7 +320,9 @@ impl<T: Absorb<Ops>, Ops: Default> WriteHandle<T, Ops> {
         // since they'll also be needed by the r_handle copy
         T::absorb_first(w_handle, &mut self.pending_ops, r_handle);
 
+        // self.partial_ops is empty and self.pending_ops has been partially applied => swap them
         std::mem::swap(&mut self.partial_ops, &mut self.pending_ops);
+
         // the w_handle copy is about to become the r_handle, and can ignore the oplog
 
         // w_handle (the old r_handle) is now fully up to date!
