@@ -430,7 +430,6 @@ impl<T: Absorb<Ops>, Ops: Default> Deref for WriteHandle<T, Ops> {
 /// impl left_right::Absorb<()> for Data {
 ///     fn is_empty(_: &()) -> bool { true }
 ///     fn absorb_first(&mut self, _: &mut (), _: &Self) {}
-///     fn sync_with(&mut self, _: &Self) {}
 /// }
 ///
 /// fn is_send<T: Send>() {

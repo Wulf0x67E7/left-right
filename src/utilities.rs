@@ -1,5 +1,6 @@
 #[cfg(test)]
 #[derive(Debug, Default)]
+#[cfg(test)]
 pub struct CounterAddOps(pub Vec<i32>);
 
 #[cfg(test)]

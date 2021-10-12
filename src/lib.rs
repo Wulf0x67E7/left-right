@@ -104,10 +104,6 @@
 //!
 //!     // See the documentation of `Absorb::drop_first`.
 //!     fn drop_first(self: Box<Self>) {}
-//!
-//!     fn sync_with(&mut self, first: &Self) {
-//!         *self = *first
-//!     }
 //! }
 //!
 //! // Now, you can construct a new left-right over an instance of your data structure.
