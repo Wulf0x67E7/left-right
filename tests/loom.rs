@@ -13,13 +13,13 @@ mod loom_tests {
         loom::model(|| {
             let (mut w, r) = left_right::new::<i32, _>();
 
-            w.pending().0.push(1);
+            w.pending_mut().0.push(1);
             w.publish();
 
             let jh = thread::spawn(move || *r.enter().unwrap());
 
             w.publish();
-            w.pending().0.push(1);
+            w.pending_mut().0.push(1);
 
             let val = jh.join().unwrap();
 

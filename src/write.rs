@@ -32,8 +32,6 @@ pub struct WriteHandle<T: Absorb<Ops>, Ops: Default> {
     refreshes: usize,
     #[cfg(test)]
     is_waiting: Arc<AtomicBool>,
-    /// A publish has happened, but the two copies have not been synchronized yet.
-    second: bool,
     /// If we call `Self::take` the drop needs to be different.
     taken: bool,
 }
@@ -62,7 +60,6 @@ where
             .field("partial_op", &self.partial_ops)
             .field("pending_op", &self.pending_ops)
             .field("r_handle", &self.r_handle)
-            .field("second", &self.second)
             .finish()
     }
 }
@@ -212,7 +209,6 @@ impl<T: Absorb<Ops>, Ops: Default> WriteHandle<T, Ops> {
             is_waiting: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
             refreshes: 0,
-            second: true,
             taken: false,
         }
     }
@@ -311,11 +307,6 @@ impl<T: Absorb<Ops>, Ops: Default> WriteHandle<T, Ops> {
                 .unwrap()
         };
 
-        if self.second {
-            Absorb::sync_with(w_handle, r_handle);
-            self.second = false
-        }
-
         // the w_handle copy has not seen any of the writes in the oplog
         // the r_handle copy has not seen any of the writes following swap_index
         // we can drain out the operations that only the w_handle copy needs
@@ -384,11 +375,13 @@ impl<T: Absorb<Ops>, Ops: Default> WriteHandle<T, Ops> {
         !T::is_empty(&self.pending_ops)
     }
 
-    /// Append the given operation to the operational log.
-    ///
-    /// Its effects will not be exposed to readers until you call [`publish`](Self::publish).
-    pub fn pending(&mut self) -> &mut Ops {
+    /// Returns a mutable reference to the currently pending operations.
+    pub fn pending_mut(&mut self) -> &mut Ops {
         &mut self.pending_ops
+    }
+    /// Returns a shared reference to the currently pending operations.
+    pub fn pending_ref(&self) -> &Ops {
+        &self.pending_ops
     }
 
     /// Returns a raw pointer to the write copy of the data (the one readers are _not_ accessing).
@@ -517,12 +510,12 @@ mod tests {
     #[test]
     fn append_test() {
         let (mut w, _r) = crate::new::<i32, _>();
-        w.pending().0.push(1);
+        w.pending_mut().0.push(1);
         assert_eq!(w.partial_ops.0.len(), 0);
         assert_eq!(w.pending_ops.0.len(), 1);
         w.publish();
-        w.pending().0.push(2);
-        w.pending().0.push(3);
+        w.pending_mut().0.push(2);
+        w.pending_mut().0.push(3);
         assert_eq!(w.partial_ops.0.len(), 1);
         assert_eq!(w.pending_ops.0.len(), 2);
     }
@@ -531,36 +524,36 @@ mod tests {
     fn take_test() {
         // publish twice then take with no pending operations
         let (mut w, _r) = crate::new_from_empty::<i32, _>(2);
-        w.pending().0.push(1);
+        w.pending_mut().0.push(1);
         w.publish();
-        w.pending().0.push(1);
+        w.pending_mut().0.push(1);
         w.publish();
         assert_eq!(*w.take(), 4);
 
         // publish twice then pending operation published by take
         let (mut w, _r) = crate::new_from_empty::<i32, _>(2);
-        w.pending().0.push(1);
+        w.pending_mut().0.push(1);
         w.publish();
-        w.pending().0.push(2);
+        w.pending_mut().0.push(2);
         w.publish();
-        w.pending().0.push(3);
+        w.pending_mut().0.push(3);
         assert_eq!(*w.take(), 8);
 
         // normal publish then pending operations published by take
         let (mut w, _r) = crate::new_from_empty::<i32, _>(2);
-        w.pending().0.push(1);
+        w.pending_mut().0.push(1);
         w.publish();
-        w.pending().0.push(1);
+        w.pending_mut().0.push(1);
         assert_eq!(*w.take(), 4);
 
         // pending operations published by take
         let (mut w, _r) = crate::new_from_empty::<i32, _>(2);
-        w.pending().0.push(1);
+        w.pending_mut().0.push(1);
         assert_eq!(*w.take(), 3);
 
         // emptry op queue
         let (mut w, _r) = crate::new_from_empty::<i32, _>(2);
-        w.pending().0.push(1);
+        w.pending_mut().0.push(1);
         w.publish();
         assert_eq!(*w.take(), 3);
 
@@ -624,7 +617,7 @@ mod tests {
     #[test]
     fn flush_noblock() {
         let (mut w, r) = crate::new::<i32, _>();
-        w.pending().0.push(42);
+        w.pending_mut().0.push(42);
         w.publish();
         assert_eq!(*r.enter().unwrap(), 42);
 
@@ -647,13 +640,13 @@ mod tests {
         assert!(!w.has_pending_operations());
         assert_eq!(w.refreshes, 1);
 
-        w.pending().0.push(42);
+        w.pending_mut().0.push(42);
         assert!(w.has_pending_operations());
         w.publish();
         assert!(!w.has_pending_operations());
         assert_eq!(w.refreshes, 2);
 
-        w.pending().0.push(42);
+        w.pending_mut().0.push(42);
         assert!(w.has_pending_operations());
         w.publish();
         assert!(!w.has_pending_operations());

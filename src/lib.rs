@@ -121,7 +121,7 @@
 //! impl Counter {
 //!     // The methods on you write handle type will likely all just add to the operational log.
 //!     pub fn add(&mut self, i: i32) {
-//!         self.0.pending().0.push(i);
+//!         self.0.pending_mut().0.push(i);
 //!     }
 //!
 //!     // You should also provide a method for exposing the results of any pending operations.
@@ -264,19 +264,6 @@ pub trait Absorb<Ops: Default> {
     /// Defaults to calling `Self::drop`.
     #[allow(clippy::boxed_local)]
     fn drop_second(self: Box<Self>) {}
-
-    /// Sync the data from `first` into `self`.
-    ///
-    /// To improve initialization performance, before the first call to `publish` changes aren't
-    /// added to the internal oplog, but applied to the first copy directly using `absorb_second`.
-    /// The first `publish` then calls `sync_with` instead of `absorb_second`.
-    ///
-    /// `sync_with` should ensure that `self`'s state exactly matches that of `first` after it
-    /// returns. Be particularly mindful of non-deterministic implementations of traits that are
-    /// often assumed to be deterministic (like `Eq` and `Hash`), and of "hidden states" that
-    /// subtly affect results like the `RandomState` of a `HashMap` which can change iteration
-    /// order.
-    fn sync_with(&mut self, first: &Self);
 }
 
 /// Construct a new write and read handle pair from an empty data structure.
