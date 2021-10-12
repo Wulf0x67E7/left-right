@@ -1,28 +1,22 @@
 #[cfg(test)]
-#[derive(Debug)]
-pub struct CounterAddOp(pub i32);
+#[derive(Debug, Default)]
+pub struct CounterAddOps(pub Vec<i32>);
 
 #[cfg(test)]
-impl Absorb<CounterAddOp> for i32 {
-    type OpLog = Vec<CounterAddOp>;
-
-    fn log_empty(log: &Vec<CounterAddOp>) -> bool {
-        log.is_empty()
+impl Absorb<CounterAddOps> for i32 {
+    fn is_empty(ops: &CounterAddOps) -> bool {
+        ops.0.is_empty()
     }
 
-    fn log_ops<I: IntoIterator<Item = CounterAddOp>>(pending_log: &mut Vec<CounterAddOp>, ops: I) {
-        pending_log.extend(ops);
-    }
-
-    fn absorb_first(&mut self, pending_log: &mut Vec<CounterAddOp>, _: &Self) {
-        for op in pending_log {
-            *self += op.0;
+    fn absorb_first(&mut self, pending_ops: &mut CounterAddOps, _: &Self) {
+        for op in pending_ops.0.iter_mut() {
+            *self += *op;
         }
     }
 
-    fn absorb_second(&mut self, partial_log: &mut Vec<CounterAddOp>, _: &Self) {
-        for op in partial_log.drain(..) {
-            *self += op.0;
+    fn absorb_second(&mut self, partial_ops: &mut CounterAddOps, _: &Self) {
+        for op in partial_ops.0.drain(..) {
+            *self += op;
         }
     }
 

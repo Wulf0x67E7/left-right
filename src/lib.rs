@@ -68,33 +68,26 @@
 //!
 //! // First, define an operational log type.
 //! // For most real-world use-cases, this will be an `enum`, but we'll keep it simple:
-//! #[derive(Debug)]
-//! struct CounterAddOp(i32);
+//! #[derive(Debug, Default)]
+//! struct CounterAddOp(Vec<i32>);
 //!
 //! // Then, implement the unsafe `Absorb` trait for your data structure type,
 //! // and provide the oplog type as the generic argument.
 //! // You can read this as "`i32` can absorb changes of type `CounterAddOp`".
 //! impl Absorb<CounterAddOp> for i32 {
-//!     // See the documentation of `Absorb::OpLog`.
-//!     type OpLog = Vec<CounterAddOp>;
 //!
 //!     // See the documentation of `Absorb::log_empty`.
-//!     fn log_empty(log: &Vec<CounterAddOp>) -> bool {
-//!         log.is_empty()
-//!     }
-//!
-//!     // See the documentation of `Absorb::log_ops`.
-//!     fn log_ops<I: IntoIterator<Item = CounterAddOp>>(pending_log: &mut Vec<CounterAddOp>, ops: I) {
-//!         pending_log.extend(ops);
+//!     fn is_empty(ops: &CounterAddOp) -> bool {
+//!         ops.0.is_empty()
 //!     }
 //!
 //!     // See the documentation of `Absorb::absorb_first`.
 //!     //
 //!     // Essentially, this is where you define what applying
 //!     // the oplog type to the datastructure does.
-//!     fn absorb_first(&mut self, pending_log: &mut Vec<CounterAddOp>, _: &Self) {
-//!         for op in pending_log {
-//!             *self += op.0;
+//!     fn absorb_first(&mut self, pending_log: &mut CounterAddOp, _: &Self) {
+//!         for op in pending_log.0.iter_mut() {
+//!             *self += *op;
 //!         }
 //!     }
 //!
@@ -103,9 +96,9 @@
 //!     // This may or may not be the same as `absorb_first`,
 //!     // depending on whether or not you de-duplicate values
 //!     // across the two copies of your data structure.
-//!     fn absorb_second(&mut self, partial_log: &mut Vec<CounterAddOp>, _: &Self) {
-//!         for op in partial_log.drain(..) {
-//!             *self += op.0;
+//!     fn absorb_second(&mut self, partial_log: &mut CounterAddOp, _: &Self) {
+//!         for op in partial_log.0.drain(..) {
+//!             *self += op;
 //!         }
 //!     }
 //!
@@ -128,7 +121,7 @@
 //! impl Counter {
 //!     // The methods on you write handle type will likely all just add to the operational log.
 //!     pub fn add(&mut self, i: i32) {
-//!         self.0.append(CounterAddOp(i));
+//!         self.0.pending().0.push(i);
 //!     }
 //!
 //!     // You should also provide a method for exposing the results of any pending operations.
@@ -230,28 +223,18 @@ pub mod aliasing;
 /// the first of the two copies. In this case, de-duplicating implementations may need to forget
 /// values rather than drop them so that they are not dropped twice when the second copy is
 /// dropped.
-pub trait Absorb<O> {
-    /// The type used to store operations.
+pub trait Absorb<Ops: Default> {
+    /// Check whether `ops` is empty.
     ///
-    /// TODO: expand doc.
-    type OpLog: Default + std::fmt::Debug;
-
-    /// Check whether `log` is empty.
-    ///
-    /// If after [`Absorb::absorb_second`] calling this on `partial_log` returns `true` it will be reused as `pending_log` instead of `OpLog::default()`.
-    fn log_empty(log: &Self::OpLog) -> bool;
-
-    /// Move all items in `ops` into `pending_log`.
-    ///
-    /// TODO: expand doc.
-    fn log_ops<I: IntoIterator<Item = O>>(pending_log: &mut Self::OpLog, ops: I);
+    /// If after [`Absorb::absorb_second`] calling this on `partial_ops` returns `true` it will be reused as `pending_ops` instead of `Ops::default()`.
+    fn is_empty(ops: &Ops) -> bool;
 
     /// Apply `O` to the first of the two copies.
     ///
     /// `other` is a reference to the other copy of the data, which has seen all operations up
     /// until the previous call to [`WriteHandle::publish`]. That is, `other` is one "publish
     /// cycle" behind.
-    fn absorb_first(&mut self, pending_log: &mut Self::OpLog, other: &Self);
+    fn absorb_first(&mut self, pending_ops: &mut Ops, other: &Self);
 
     /// Apply `O` to the second of the two copies.
     ///
@@ -266,8 +249,8 @@ pub trait Absorb<O> {
     /// `RandomState` of a `HashMap` which can change iteration order.
     ///
     /// Defaults to calling `absorb_first`.
-    fn absorb_second(&mut self, partial_log: &mut Self::OpLog, other: &Self) {
-        Self::absorb_first(self, partial_log, other);
+    fn absorb_second(&mut self, partial_ops: &mut Ops, other: &Self) {
+        Self::absorb_first(self, partial_ops, other);
     }
 
     /// Drop the first of the two copies.
@@ -299,10 +282,9 @@ pub trait Absorb<O> {
 /// Construct a new write and read handle pair from an empty data structure.
 ///
 /// The type must implement `Clone` so we can construct the second copy from the first.
-pub fn new_from_empty<T, O>(t: T) -> (WriteHandle<T, O>, ReadHandle<T>)
-where
-    T: Absorb<O> + Clone,
-{
+pub fn new_from_empty<T: Absorb<Ops> + Clone, Ops: Default>(
+    t: T,
+) -> (WriteHandle<T, Ops>, ReadHandle<T>) {
     let epochs = Default::default();
 
     let r = ReadHandle::new(t.clone(), Arc::clone(&epochs));
@@ -320,10 +302,7 @@ where
 ///
 /// If your type's `Default` implementation does not guarantee this, you can use `new_from_empty`,
 /// which relies on `Clone` instead of `Default`.
-pub fn new<T, O>() -> (WriteHandle<T, O>, ReadHandle<T>)
-where
-    T: Absorb<O> + Default,
-{
+pub fn new<T: Absorb<Ops> + Default, Ops: Default>() -> (WriteHandle<T, Ops>, ReadHandle<T>) {
     let epochs = Default::default();
 
     let r = ReadHandle::new(T::default(), Arc::clone(&epochs));
