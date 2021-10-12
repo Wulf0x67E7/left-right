@@ -5,7 +5,6 @@ pub struct CounterAddOp(pub i32);
 #[cfg(test)]
 impl Absorb<CounterAddOp> for i32 {
     type OpLog = Vec<CounterAddOp>;
-    const LOG_REUSE: bool = true;
 
     fn log_empty(log: &Vec<CounterAddOp>) -> bool {
         log.is_empty()

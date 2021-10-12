@@ -78,9 +78,6 @@
 //!     // See the documentation of `Absorb::OpLog`.
 //!     type OpLog = Vec<CounterAddOp>;
 //!
-//!     // See the documentation of `Absorb::LOG_REUSE`.
-//!     const LOG_REUSE: bool = true;
-//!
 //!     // See the documentation of `Absorb::log_empty`.
 //!     fn log_empty(log: &Vec<CounterAddOp>) -> bool {
 //!         log.is_empty()
@@ -234,9 +231,19 @@ pub mod aliasing;
 /// values rather than drop them so that they are not dropped twice when the second copy is
 /// dropped.
 pub trait Absorb<O> {
+    /// The type used to store operations.
+    ///
+    /// TODO: expand doc.
     type OpLog: Default + std::fmt::Debug;
-    const LOG_REUSE: bool = false;
+
+    /// Check whether `log` is empty.
+    ///
+    /// If after [`Absorb::absorb_second`] calling this on `partial_log` returns `true` it will be reused as `pending_log` instead of `OpLog::default()`.
     fn log_empty(log: &Self::OpLog) -> bool;
+
+    /// Move all items in `ops` into `pending_log`.
+    ///
+    /// TODO: expand doc.
     fn log_ops<I: IntoIterator<Item = O>>(pending_log: &mut Self::OpLog, ops: I);
 
     /// Apply `O` to the first of the two copies.

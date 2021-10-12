@@ -338,7 +338,7 @@ where
             //
             // NOTE: the if above is because drain(0..0) would remove 0
             T::absorb_second(w_handle, &mut self.partial_log, r_handle);
-            if !T::LOG_REUSE {
+            if !T::log_empty(&self.partial_log) {
                 self.partial_log = T::OpLog::default();
             }
 
