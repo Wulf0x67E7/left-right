@@ -21,8 +21,4 @@ impl Absorb<CounterAddOps> for i32 {
     }
 
     fn drop_first(self: Box<Self>) {}
-
-    fn sync_with(&mut self, first: &Self) {
-        *self = *first
-    }
 }
