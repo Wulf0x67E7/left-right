@@ -305,8 +305,8 @@ pub fn new_buffered_from_empty<T: Absorb<Ops> + Clone, Ops: Default>(
     let epochs = Default::default();
 
     let r = ReadHandle::new(t.clone(), Arc::clone(&epochs));
-    let w = WriteHandle::new(t, epochs, r.clone());
-    (w.into_buffered(), r)
+    let w = BufferedWriteHandle::new(WriteHandle::new(t, epochs, r.clone()));
+    (w, r)
 }
 
 /// Construct a new write and read handle pair from the data structure default.
@@ -324,6 +324,6 @@ pub fn new_buffered<T: Absorb<Ops> + Default, Ops: Default>(
     let epochs = Default::default();
 
     let r = ReadHandle::new(T::default(), Arc::clone(&epochs));
-    let w = WriteHandle::new(T::default(), epochs, r.clone());
-    (w.into_buffered(), r)
+    let w = BufferedWriteHandle::new(WriteHandle::new(T::default(), epochs, r.clone()));
+    (w, r)
 }

@@ -11,10 +11,6 @@ use std::{fmt, thread};
 
 /// A writer handle to a left-right guarded data structure.
 ///
-/// All operations on the underlying data should be enqueued as operations of type `Ops` using
-/// [`append`](Self::append). The effect of this operations are only exposed to readers once
-/// [`publish`](Self::publish) is called.
-///
 /// # Reading through a `WriteHandle`
 ///
 /// `WriteHandle` allows access to a [`ReadHandle`] through `Deref<Target = ReadHandle>`. Note that
@@ -74,18 +70,22 @@ impl<T> WriteHandle<T> {
         // Disallow taking again.
         self.taken = true;
 
-        // first, ensure both copies are up to date
-        // (otherwise safely dropping the possibly duplicated w_handle data is a pain)
-        self.wait();
-
-        // next, grab the read handle and set it to NULL
+        // Publish Null
         let r_handle = self.r_handle.inner.swap(ptr::null_mut(), Ordering::Release);
-
-        // now, wait for all readers to depart
+        // ensure that the subsequent epoch reads aren't re-ordered to before the swap
+        fence(Ordering::SeqCst);
+        // Record old epochs
         let epochs = Arc::clone(&self.epochs);
         let mut epochs = epochs.lock().unwrap();
+        // we're over-estimating here, but slab doesn't expose its max index
+        self.last_epochs.resize(epochs.capacity(), 0);
+        for (ri, epoch) in epochs.iter() {
+            self.last_epochs[ri] = epoch.load(Ordering::Acquire);
+        }
+        // ensure that the subsequent epoch reads aren't re-ordered to before the swap
+        fence(Ordering::SeqCst);
+        // now, wait for all readers to depart
         self.wait_inner(&mut epochs);
-
         // ensure that the subsequent epoch reads aren't re-ordered to before the swap
         fence(Ordering::SeqCst);
 
@@ -124,7 +124,8 @@ impl<T> WriteHandle<T> {
             w_handle: unsafe { NonNull::new_unchecked(Box::into_raw(Box::new(w_handle))) },
             r_handle,
             last_epochs: Vec::new(),
-            should_wait: true,
+            // Before the first publish there can be no readers in the write half, so we don't need to wait for them to depart
+            should_wait: false,
             #[cfg(test)]
             is_waiting: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
@@ -146,7 +147,6 @@ impl<T> WriteHandle<T> {
             let mut epochs = epochs.lock().unwrap();
 
             self.wait_inner(&mut epochs);
-            self.should_wait = false;
         }
     }
 
@@ -210,6 +210,7 @@ impl<T> WriteHandle<T> {
         {
             self.is_waiting.store(false, Ordering::Relaxed);
         }
+        self.should_wait = false;
     }
 
     /// Publish all operations append to the log to reads.
@@ -231,6 +232,8 @@ impl<T> WriteHandle<T> {
 
         if self.should_wait {
             self.wait_inner(&mut epochs);
+        } else {
+            self.last_epochs.resize(epochs.capacity(), 0);
         }
 
         // at this point, we have exclusive access to w_handle, and it is up-to-date with all
@@ -266,36 +269,34 @@ impl<T> WriteHandle<T> {
 
         self
     }
+    /// Returns a mutable reference to the write half and a shared reference to the read half.
+    ///
+    /// Makes sure to first wait for any readers still on the write half to depart.
     pub fn get(&mut self) -> (&mut T, &T) {
         self.wait();
-
-        // all the readers have left!
-        // safety: we haven't freed the Box, and no readers are accessing the w_handle
-        let w_handle = unsafe { self.w_handle.as_mut() };
-
-        // safety: we will not swap while we hold this reference
-        let r_handle = unsafe {
-            self.r_handle
-                .inner
-                .load(Ordering::Acquire)
-                .as_ref()
-                .unwrap()
-        };
-
-        (w_handle, r_handle)
+        self.try_get()
+            .expect("We just waited for all readers to depart.")
     }
 
-    /// Returns a raw pointer to the write copy of the data (the one readers are _not_ accessing).
-    ///
-    /// Note that it is only safe to mutate through this pointer if you _know_ that there are no
-    /// readers still present in this copy. This is not normally something you know; even after
-    /// calling `publish`, readers may still be in the write copy for some time. In general, the
-    /// only time you know this is okay is before the first call to `publish` (since no readers
-    /// ever entered the write copy).
-    // TODO: Make this return `Option<&mut T>`,
-    // and only `Some` if there are indeed to readers in the write copy.
-    pub fn raw_write_handle(&mut self) -> NonNull<T> {
-        self.w_handle
+    /// Returns an `Option::Some` containing a mutable reference to the write half and a shared reference to the read half
+    /// or `Option::None` if there are potentially still readers yet to depart from the write half.
+    pub fn try_get(&mut self) -> Option<(&mut T, &T)> {
+        if self.should_wait {
+            None
+        } else {
+            // all the readers have left!
+            // safety: we haven't freed the Box, and no readers are accessing the w_handle
+            let w_handle = unsafe { self.w_handle.as_mut() };
+            // safety: we will not swap while we hold this reference
+            let r_handle = unsafe {
+                self.r_handle
+                    .inner
+                    .load(Ordering::Acquire)
+                    .as_ref()
+                    .unwrap()
+            };
+            Some((w_handle, r_handle))
+        }
     }
 
     /// Returns the backing data structure.
@@ -310,12 +311,6 @@ impl<T> WriteHandle<T> {
         // `take_inner` returns `Some`
         self.take_inner()
             .expect("inner is only taken here then self is dropped")
-    }
-    pub fn into_buffered<Ops: Default>(self) -> BufferedWriteHandle<T, Ops>
-    where
-        T: Absorb<Ops>,
-    {
-        BufferedWriteHandle::new(self)
     }
 }
 
@@ -455,6 +450,46 @@ impl<T: Absorb<Ops>, Ops: Default> Drop for Taken<T, Ops> {
     }
 }
 
+/// A buffered writer handle to a left-right guarded data structure.
+///
+/// All operations on the underlying data should be encoded as operations of type `Ops` by mutating value returned by [`pending_mut`](Self::pending_mut).
+/// The effect of these operations are only exposed to readers once [`publish`](Self::publish) is called.
+///
+/// # Reading through a `BufferedWriteHandle`
+///
+/// `BufferedWriteHandle` allows access to a [`ReadHandle`] through `Deref<Target = ReadHandle>`. Note that
+/// since the reads go through a [`ReadHandle`], those reads are subject to the same visibility
+/// restrictions as reads that do not go through the `BufferedWriteHandle`: they only see the effects of
+/// operations prior to the last call to [`publish`](Self::publish).
+///
+/// # Fast initialization
+///
+/// A good way to avoid the overhead of buffering during initialization (where it is unnecessary) is to use [`try_get_raw`](Self::try_get_raw).
+/// ```
+/// use left_right::{Absorb, BufferedWriteHandle};
+///
+/// #[derive(Default, Clone)]
+/// struct Data;
+/// impl Absorb<()> for Data {
+///     fn is_empty(_: &()) -> bool { true }
+///     fn absorb_first(&mut self, _: &mut (), _: &Self) {}
+/// }
+///
+/// let (mut w, _r) = left_right::new_buffered::<Data, ()>();
+/// {
+///     // Get raw write handle...
+///     let raw_w = w.try_get_raw().expect("before first publish").0;
+///     {
+///         //...initialize raw_w...
+///     }
+///     // ...expose changes to readers (won't have to wait)...
+///     w.publish();
+///     // ...and initialize the other value (get_raw will be the only wait).
+///     let (raw_w, raw_r) = w.get_raw();
+///     *raw_w = raw_r.clone();
+/// }
+/// {/* continue using `w.pending_mut()` from here on out */}
+/// ```
 #[derive(Debug)]
 pub struct BufferedWriteHandle<T: Absorb<Ops>, Ops: Default> {
     inner: WriteHandle<T>,
@@ -471,6 +506,7 @@ impl<T: Absorb<Ops>, Ops: Default> BufferedWriteHandle<T, Ops> {
             pending: Ops::default(),
         }
     }
+    /// Applies all pending operations and makes the result visible to the readers.
     pub fn publish(&mut self) {
         let (w_handle, r_handle) = self.inner.get();
         // the w_handle copy has not seen any of the writes in the oplog
@@ -491,26 +527,25 @@ impl<T: Absorb<Ops>, Ops: Default> BufferedWriteHandle<T, Ops> {
 
         self.inner.swap();
     }
+    /// Convenience wrapper around `T::is_empty(self.pending_ref())`.
     pub fn is_empty(&self) -> bool {
         T::is_empty(&self.pending)
     }
+    /// Returns a mutable reference to the pending operations.
     pub fn pending_mut(&mut self) -> &mut Ops {
         &mut self.pending
     }
-    pub fn pending_ref(&self) -> &Ops {
+    /// Returns a shared reference to the pending operations.
+    pub fn pending(&self) -> &Ops {
         &self.pending
     }
     /// Returns a raw pointer to the write copy of the data (the one readers are _not_ accessing).
-    ///
-    /// Note that it is only safe to mutate through this pointer if you _know_ that there are no
-    /// readers still present in this copy. This is not normally something you know; even after
-    /// calling `publish`, readers may still be in the write copy for some time. In general, the
-    /// only time you know this is okay is before the first call to `publish` (since no readers
-    /// ever entered the write copy).
-    // TODO: Make this return `Option<&mut T>`,
-    // and only `Some` if there are indeed to readers in the write copy.
-    pub fn raw_write_handle(&mut self) -> NonNull<T> {
-        self.inner.w_handle
+    pub fn get_raw(&mut self) -> (&mut T, &T) {
+        self.inner.get()
+    }
+    /// Returns a raw pointer to the write copy of the data (the one readers are _not_ accessing).
+    pub fn try_get_raw(&mut self) -> Option<(&mut T, &T)> {
+        self.inner.try_get()
     }
 
     /// Returns the backing data structure.
@@ -535,6 +570,14 @@ impl<T: Absorb<Ops>, Ops: Default> BufferedWriteHandle<T, Ops> {
             inner: Some(r),
             _marker: PhantomData,
         }
+    }
+}
+
+// allow using write handle for reads
+impl<T: Absorb<Ops>, Ops: Default> Deref for BufferedWriteHandle<T, Ops> {
+    type Target = ReadHandle<T>;
+    fn deref(&self) -> &Self::Target {
+        &self.inner.r_handle
     }
 }
 
