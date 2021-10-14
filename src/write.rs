@@ -464,31 +464,35 @@ impl<T: Absorb<Ops>, Ops: Default> Drop for Taken<T, Ops> {
 ///
 /// # Fast initialization
 ///
-/// A good way to avoid the overhead of buffering during initialization (where it is unnecessary) is to use [`try_get_raw`](Self::try_get_raw).
+/// A good way to avoid the overhead of buffering during initialization (where it is unnecessary) is to use [`get_raw`](Self::get_raw)/[`try_get_raw`](Self::try_get_raw).
 /// ```
+/// # #[derive(Default)]
+/// # struct Data;
+/// # impl Absorb<()> for Data {
+/// #     fn is_empty(_: &()) -> bool { true }
+/// #     fn absorb_first(&mut self, _: &mut (), _: &Self) {}
+/// # }
 /// use left_right::{Absorb, BufferedWriteHandle};
-///
-/// #[derive(Default, Clone)]
-/// struct Data;
-/// impl Absorb<()> for Data {
-///     fn is_empty(_: &()) -> bool { true }
-///     fn absorb_first(&mut self, _: &mut (), _: &Self) {}
-/// }
 ///
 /// let (mut w, _r) = left_right::new_buffered::<Data, ()>();
 /// {
 ///     // Get raw write handle...
 ///     let raw_w = w.try_get_raw().expect("before first publish").0;
 ///     {
-///         //...initialize raw_w...
+///         //...initialize the first value...
 ///     }
 ///     // ...expose changes to readers (won't have to wait)...
 ///     w.publish();
-///     // ...and initialize the other value (get_raw will be the only wait).
+///     // ...get the now swapped handles (get_raw will be the only wait)...
 ///     let (raw_w, raw_r) = w.get_raw();
-///     *raw_w = raw_r.clone();
+///     {
+///         // ...and initialize the other value.
+///         // f.e. `*raw_w = raw_r.clone();`
+///     }
 /// }
-/// {/* continue using `w.pending_mut()` from here on out */}
+/// {
+///     // continue using `w.pending_mut()` from here on out.
+/// }
 /// ```
 #[derive(Debug)]
 pub struct BufferedWriteHandle<T: Absorb<Ops>, Ops: Default> {
