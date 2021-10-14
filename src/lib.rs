@@ -64,7 +64,7 @@
 //! yourself, here's what you do:
 //!
 //! ```rust
-//! use left_right::{Absorb, ReadHandle, WriteHandle};
+//! use left_right::{Absorb, ReadHandle, BufferedWriteHandle};
 //!
 //! // First, define an operational log type.
 //! // For most real-world use-cases, this will be an `enum`, but we'll keep it simple:
@@ -109,11 +109,11 @@
 //! // Now, you can construct a new left-right over an instance of your data structure.
 //! // This will give you a `WriteHandle` that accepts writes in the form of oplog entries,
 //! // and a (cloneable) `ReadHandle` that gives you `&` access to the data structure.
-//! let (write, read) = left_right::new::<i32, CounterAddOp>();
+//! let (write, read) = left_right::new_buffered::<i32, CounterAddOp>();
 //!
 //! // You will likely want to embed these handles in your own types so that you can
 //! // provide more ergonomic methods for performing operations on your type.
-//! struct Counter(WriteHandle<i32, CounterAddOp>);
+//! struct Counter(BufferedWriteHandle<i32, CounterAddOp>);
 //! impl Counter {
 //!     // The methods on you write handle type will likely all just add to the operational log.
 //!     pub fn add(&mut self, i: i32) {
@@ -189,7 +189,7 @@ type Epochs = Arc<Mutex<slab::Slab<Arc<AtomicUsize>>>>;
 
 mod write;
 pub use crate::write::Taken;
-pub use crate::write::WriteHandle;
+pub use crate::write::{BufferedWriteHandle, WriteHandle};
 
 mod read;
 pub use crate::read::{ReadGuard, ReadHandle, ReadHandleFactory};
@@ -270,9 +270,7 @@ pub trait Absorb<Ops: Default> {
 /// Construct a new write and read handle pair from an empty data structure.
 ///
 /// The type must implement `Clone` so we can construct the second copy from the first.
-pub fn new_from_empty<T: Absorb<Ops> + Clone, Ops: Default>(
-    t: T,
-) -> (WriteHandle<T, Ops>, ReadHandle<T>) {
+pub fn new_from_empty<T: Clone>(t: T) -> (WriteHandle<T>, ReadHandle<T>) {
     let epochs = Default::default();
 
     let r = ReadHandle::new(t.clone(), Arc::clone(&epochs));
@@ -290,10 +288,42 @@ pub fn new_from_empty<T: Absorb<Ops> + Clone, Ops: Default>(
 ///
 /// If your type's `Default` implementation does not guarantee this, you can use `new_from_empty`,
 /// which relies on `Clone` instead of `Default`.
-pub fn new<T: Absorb<Ops> + Default, Ops: Default>() -> (WriteHandle<T, Ops>, ReadHandle<T>) {
+pub fn new<T: Default>() -> (WriteHandle<T>, ReadHandle<T>) {
     let epochs = Default::default();
 
     let r = ReadHandle::new(T::default(), Arc::clone(&epochs));
     let w = WriteHandle::new(T::default(), epochs, r.clone());
     (w, r)
+}
+
+/// Construct a new write and read handle pair from an empty data structure.
+///
+/// The type must implement `Clone` so we can construct the second copy from the first.
+pub fn new_buffered_from_empty<T: Absorb<Ops> + Clone, Ops: Default>(
+    t: T,
+) -> (BufferedWriteHandle<T, Ops>, ReadHandle<T>) {
+    let epochs = Default::default();
+
+    let r = ReadHandle::new(t.clone(), Arc::clone(&epochs));
+    let w = WriteHandle::new(t, epochs, r.clone());
+    (w.into_buffered(), r)
+}
+
+/// Construct a new write and read handle pair from the data structure default.
+///
+/// The type must implement `Default` so we can construct two empty instances. You must ensure that
+/// the trait's `Default` implementation is deterministic and idempotent - that is to say, two
+/// instances created by it must behave _exactly_ the same. An example of where this is problematic
+/// is `HashMap` - due to `RandomState`, two instances returned by `Default` may have a different
+/// iteration order.
+///
+/// If your type's `Default` implementation does not guarantee this, you can use `new_from_empty`,
+/// which relies on `Clone` instead of `Default`.
+pub fn new_buffered<T: Absorb<Ops> + Default, Ops: Default>(
+) -> (BufferedWriteHandle<T, Ops>, ReadHandle<T>) {
+    let epochs = Default::default();
+
+    let r = ReadHandle::new(T::default(), Arc::clone(&epochs));
+    let w = WriteHandle::new(T::default(), epochs, r.clone());
+    (w.into_buffered(), r)
 }
